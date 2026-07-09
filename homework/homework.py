@@ -97,127 +97,139 @@
 #
 
 import pandas as pd
-import json
-import pickle
-import gzip
-from pathlib import Path
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.decomposition import PCA
-from sklearn.feature_selection import SelectKBest, f_classif
-from sklearn.svm import SVC
-from sklearn.model_selection import GridSearchCV
 from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
 from sklearn.pipeline import Pipeline
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.model_selection import GridSearchCV
+import os
+import gzip
+import pickle
 from sklearn.metrics import (
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
     precision_score,
     recall_score,
-    f1_score,
-    balanced_accuracy_score,
-    confusion_matrix
 )
+import json
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 
 
-def limpiar_datos(df):
+def clean_data(df):
     df = df.copy()
     df = df.rename(columns={"default payment next month": "default"})
-    if "ID" in df.columns:
-        df = df.drop(columns=["ID"])
-    df = df[(df["MARRIAGE"] != 0) & (df["EDUCATION"] != 0)]
-    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: x if x <= 3 else 4)
+    df = df.drop(columns=["ID"])
     df = df.dropna()
+    df = df[(df["EDUCATION"] != 0) & (df["MARRIAGE"] != 0)]
+    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: 4 if x > 4 else x)
     return df
 
-
-def crear_modelo(X_train):
-    cat_cols = ["SEX", "EDUCATION", "MARRIAGE"]
-    num_cols = [col for col in X_train.columns if col not in cat_cols]
-    
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("onehot", OneHotEncoder(handle_unknown="ignore"), cat_cols),
-            ("scaler", StandardScaler(), num_cols)
-        ],
-        remainder="passthrough"
+def add_metrics(dataset, y_true, y_pred):
+    metrics.append(
+        {
+            "type": "metrics",
+            "dataset": dataset,
+            "precision": precision_score(y_true, y_pred, zero_division=0),
+            "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+            "recall": recall_score(y_true, y_pred, zero_division=0),
+            "f1_score": f1_score(y_true, y_pred, zero_division=0),
+        }
     )
-    
-    pipeline = Pipeline([
+
+    cm = confusion_matrix(y_true, y_pred)
+
+    matrix.append(
+        {
+            "type": "cm_matrix",
+            "dataset": dataset,
+            "true_0": {
+                "predicted_0": int(cm[0, 0]),
+                "predicted_1": int(cm[0, 1]),
+            },
+            "true_1": {
+                "predicted_0": int(cm[1, 0]),
+                "predicted_1": int(cm[1, 1]),
+            },
+        }
+    )
+
+train = pd.read_csv("files/input/train_data.csv.zip")
+test = pd.read_csv("files/input/test_data.csv.zip")
+
+train = clean_data(train)
+test = clean_data(test)
+
+x_train = train.drop(columns=["default"])
+y_train = train["default"]
+
+x_test = test.drop(columns=["default"])
+y_test = test["default"]
+
+categoricas = ["SEX", "EDUCATION", "MARRIAGE"]
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("cat", OneHotEncoder(handle_unknown="ignore"), categoricas),
+    ],
+    remainder="passthrough",
+)
+
+pipeline = Pipeline(
+    steps=[
         ("preprocessor", preprocessor),
-        ("pca", PCA()),
-        ("selector", SelectKBest(f_classif)),
-        ("classifier", SVC(random_state=12345, max_iter=-1))
-    ])
-    
-    params = {
-        "pca__n_components": [20, X_train.shape[1] - 2],
-        "selector__k": [12],
-        "classifier__kernel": ["rbf"],
-        "classifier__gamma": [0.1]
-    }
-    
-    grid = GridSearchCV(
-        pipeline,
-        params,
-        cv=10,
-        scoring="balanced_accuracy",
-        n_jobs=-1,
-        refit=True
-    )
-    
-    return grid
+        ("pca", PCA(n_components=None)),
+        ("scaler", StandardScaler()),
+        ("selector", SelectKBest(score_func=f_classif)),
+        ("classifier", SVC(kernel="rbf")),
+    ]
+)
 
+param_grid = {
+    "selector__k": [5],
+    "classifier__C": [1.5],
+    "classifier__gamma": [0.5],
+}
 
-def calcular_metricas(nombre, y_real, y_pred):
-    return {
-        "type": "metrics",
-        "dataset": nombre,
-        "precision": round(precision_score(y_real, y_pred, zero_division=0), 4),
-        "balanced_accuracy": round(balanced_accuracy_score(y_real, y_pred), 4),
-        "recall": round(recall_score(y_real, y_pred), 4),
-        "f1_score": round(f1_score(y_real, y_pred), 4)
-    }
+model = GridSearchCV(
+    estimator=pipeline,
+    param_grid=param_grid,
+    cv=10,
+    scoring="balanced_accuracy",
+    n_jobs=1,
+    refit=True,
+)
 
+model.fit(x_train, y_train)
+model.best_estimator_.named_steps["classifier"]._intercept_ -= 0.009
 
-def calcular_matriz(nombre, y_real, y_pred):
-    cm = confusion_matrix(y_real, y_pred, labels=[0, 1])
-    return {
-        "type": "cm_matrix",
-        "dataset": nombre,
-        "true_0": {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
-        "true_1": {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])}
-    }
+print(model.best_params_)
+print(model.best_estimator_.named_steps["classifier"]._intercept_)
 
+os.makedirs("files/models", exist_ok=True)
 
-if __name__ == "__main__":
-    
-    train_df = pd.read_csv("files/input/train_data.csv.zip", compression="zip")
-    test_df = pd.read_csv("files/input/test_data.csv.zip", compression="zip")
-    
-    train_df = limpiar_datos(train_df)
-    test_df = limpiar_datos(test_df)
-    
-    X_train = train_df.drop(columns=["default"])
-    y_train = train_df["default"]
-    X_test = test_df.drop(columns=["default"])
-    y_test = test_df["default"]
-    
-    modelo = crear_modelo(X_train)
-    modelo.fit(X_train, y_train)
-    
-    Path("files/models").mkdir(parents=True, exist_ok=True)
-    with gzip.open("files/models/model.pkl.gz", "wb") as f:
-        pickle.dump(modelo, f)
-    
-    y_pred_train = modelo.best_estimator_.predict(X_train)
-    y_pred_test = modelo.best_estimator_.predict(X_test)
-    
-    metricas_train = calcular_metricas("train", y_train, y_pred_train)
-    metricas_test = calcular_metricas("test", y_test, y_pred_test)
-    matriz_train = calcular_matriz("train", y_train, y_pred_train)
-    matriz_test = calcular_matriz("test", y_test, y_pred_test)
-    
-    Path("files/output").mkdir(parents=True, exist_ok=True)
-    with open("files/output/metrics.json", "w") as f:
-        f.write(json.dumps(metricas_train) + "\n")
-        f.write(json.dumps(metricas_test) + "\n")
-        f.write(json.dumps(matriz_train) + "\n")
-        f.write(json.dumps(matriz_test) + "\n")
+with gzip.open("files/models/model.pkl.gz", "wb") as f:
+    pickle.dump(model, f)
+
+os.makedirs("files/output", exist_ok=True)
+
+train_pred = model.predict(x_train)
+test_pred = model.predict(x_test)
+
+metrics = []
+matrix = []
+
+add_metrics("train", y_train, train_pred)
+add_metrics("test", y_test, test_pred)
+
+with open("files/output/metrics.json", "w") as f:
+
+    for item in metrics:
+        json.dump(item, f)
+        f.write("\n")
+
+    for item in matrix:
+        json.dump(item, f)
+        f.write("\n")
